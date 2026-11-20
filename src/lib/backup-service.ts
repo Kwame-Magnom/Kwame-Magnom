@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { desc, eq, inArray } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { db } from '../db/index';
 import {
   addresses,
   backupSettings,
@@ -15,8 +15,8 @@ import {
   products,
   reviews,
   users,
-} from '../db/schema.ts';
-import { getSupabaseServerClient, isSupabaseConfigured } from './supabase-server.ts';
+} from '../db/schema';
+import { getSupabaseServerClient, isSupabaseConfigured } from './supabase-server';
 
 let backupInProgress = false;
 let schedulerStarted = false;

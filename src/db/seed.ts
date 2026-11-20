@@ -1,7 +1,7 @@
 import { count } from 'drizzle-orm';
-import { db } from './index.ts';
-import { brands, categories, products, reviews, users } from './schema.ts';
-import { hashPassword } from '../lib/auth-security.ts';
+import { db } from './index';
+import { brands, categories, products, reviews, users } from './schema';
+import { hashPassword } from '../lib/auth-security';
 
 let seededOnce = false;
 let seedPromise: Promise<void> | null = null;

@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { BrandItem, CategoryItem, ProductItem, ReviewItem } from '../types.ts';
+import type { BrandItem, CategoryItem, ProductItem, ReviewItem } from '../types';
 
 export interface CatalogQueryFilters {
   category?: string;

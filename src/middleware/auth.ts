@@ -1,9 +1,9 @@
 import { NextFunction, Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
-import { db } from '../db/index.ts';
-import { users } from '../db/schema.ts';
-import { adminAuth } from '../lib/firebase-admin.ts';
-import { isAdminEmail, verifySessionToken } from '../lib/auth-security.ts';
+import { db } from '../db/index';
+import { users } from '../db/schema';
+import { adminAuth } from '../lib/firebase-admin';
+import { isAdminEmail, verifySessionToken } from '../lib/auth-security';
 
 export interface AuthenticatedUser {
   id: number;
