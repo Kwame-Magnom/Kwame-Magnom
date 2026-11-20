@@ -1,6 +1,39 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Smartphone, Laptop, Headphones } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
+import heroShowcaseImg from '@/src/assets/images/hero_electronics_showcase_1795168475559.jpg';
+import iphoneFlagshipImg from '@/src/assets/images/product_iphone_flagship_1795168475656.jpg';
+import androidFlagshipImg from '@/src/assets/images/product_android_flagship_1795168475255.jpg';
+import laptopUltrabookImg from '@/src/assets/images/product_laptop_ultrabook_1795168475793.jpg';
+import audioAccessoriesImg from '@/src/assets/images/product_audio_accessories_1795168475567.jpg';
+
+const BUNDLED_IMAGE_MAP: Record<string, string> = {
+  'hero_electronics_showcase_1795168475559.jpg': heroShowcaseImg,
+  'product_iphone_flagship_1795168475656.jpg': iphoneFlagshipImg,
+  'product_android_flagship_1795168475255.jpg': androidFlagshipImg,
+  'product_laptop_ultrabook_1795168475793.jpg': laptopUltrabookImg,
+  'product_audio_accessories_1795168475567.jpg': audioAccessoriesImg,
+};
+
+const CATEGORY_FALLBACK_IMG: Record<string, string> = {
+  iphones: iphoneFlagshipImg,
+  android: androidFlagshipImg,
+  laptops: laptopUltrabookImg,
+  accessories: audioAccessoriesImg,
+};
+
+export function resolveProductImageSrc(src: string, categoryGroup = 'iphones'): string {
+  const trimmed = (src || '').trim();
+  if (!trimmed) {
+    return CATEGORY_FALLBACK_IMG[categoryGroup] || iphoneFlagshipImg;
+  }
+  for (const [filename, bundledUrl] of Object.entries(BUNDLED_IMAGE_MAP)) {
+    if (trimmed.includes(filename)) {
+      return bundledUrl;
+    }
+  }
+  return trimmed;
+}
 
 interface ProductImageProps {
   src: string;
@@ -15,9 +48,18 @@ export const ProductImage: React.FC<ProductImageProps> = ({
   categoryGroup = 'iphones',
   className,
 }) => {
+  const primarySrc = resolveProductImageSrc(src, categoryGroup);
+  const fallbackSrc = CATEGORY_FALLBACK_IMG[categoryGroup] || iphoneFlagshipImg;
+
+  const [currentSrc, setCurrentSrc] = useState(primarySrc);
   const [failed, setFailed] = useState(false);
 
-  if (failed || !src) {
+  useEffect(() => {
+    setCurrentSrc(resolveProductImageSrc(src, categoryGroup));
+    setFailed(false);
+  }, [src, categoryGroup]);
+
+  if (failed || !currentSrc) {
     const Icon =
       categoryGroup === 'laptops'
         ? Laptop
@@ -42,10 +84,16 @@ export const ProductImage: React.FC<ProductImageProps> = ({
 
   return (
     <img
-      src={src}
+      src={currentSrc}
       alt={alt}
       referrerPolicy="no-referrer"
-      onError={() => setFailed(true)}
+      onError={() => {
+        if (currentSrc !== fallbackSrc) {
+          setCurrentSrc(fallbackSrc);
+        } else {
+          setFailed(true);
+        }
+      }}
       className={cn('object-cover', className)}
     />
   );

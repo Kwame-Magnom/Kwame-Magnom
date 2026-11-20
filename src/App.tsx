@@ -36,8 +36,9 @@ import { CartCheckoutSheet } from '@/src/components/CartCheckoutSheet';
 import { CustomerDashboard } from '@/src/components/CustomerDashboard';
 import { AdminDashboard } from '@/src/components/AdminDashboard';
 import { OrderTrackerModal } from '@/src/components/OrderTrackerModal';
+import heroShowcaseImg from '@/src/assets/images/hero_electronics_showcase_1795168475559.jpg';
 
-const HERO_IMAGE = '/src/assets/images/hero_electronics_showcase_1795168475559.jpg';
+const HERO_IMAGE = heroShowcaseImg;
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'store' | 'customer' | 'admin'>('store');
