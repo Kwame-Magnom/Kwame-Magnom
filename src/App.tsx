@@ -16,7 +16,8 @@ import {
   User as UserIcon,
 } from 'lucide-react';
 import { auth } from '@/src/lib/firebase';
-import { apiFetch, getStoredSessionToken, setSessionToken } from '@/src/lib/api';
+import { apiFetch, getStoredSessionToken, setSessionToken, supabase } from '@/src/lib/api';
+import { fetchCatalogFromSupabase } from '@/src/lib/supabase-catalog';
 import { CATEGORY_GROUP_LABELS, formatGhs } from '@/src/lib/utils';
 import {
   BrandItem,
@@ -99,7 +100,15 @@ export default function App() {
       setProducts(data.products || []);
       setRecentReviews(data.recentReviews || []);
     } catch (err: any) {
-      setCatalogError(err?.message || 'Unable to load storefront catalog.');
+      try {
+        const fallback = await fetchCatalogFromSupabase(supabase);
+        setCategories(fallback.categories || []);
+        setBrands(fallback.brands || []);
+        setProducts(fallback.products || []);
+        setRecentReviews(fallback.recentReviews || []);
+      } catch {
+        setCatalogError(err?.message || 'Unable to load storefront catalog.');
+      }
     } finally {
       setLoadingCatalog(false);
     }

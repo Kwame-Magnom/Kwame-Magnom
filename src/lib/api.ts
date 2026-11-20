@@ -49,9 +49,18 @@ export async function apiFetch<T = any>(
     headers,
   });
 
-  const data = await response.json().catch(() => ({}));
+  const rawText = await response.text().catch(() => '');
+  let data: any = {};
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = {};
+    }
+  }
   if (!response.ok) {
-    const err = new Error(data.error || 'Request failed') as Error & {
+    const fallbackMsg = `Request failed (HTTP ${response.status})`;
+    const err = new Error(data.error || fallbackMsg) as Error & {
       status?: number;
       data?: any;
     };

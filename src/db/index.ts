@@ -6,9 +6,16 @@ declare global {
   var _postgresPool: Pool | undefined;
 }
 
+export function hasPostgresConfig(): boolean {
+  return Boolean(
+    process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || process.env.SQL_HOST
+  );
+}
+
 export const createPool = () => {
   if (!global._postgresPool) {
     const connectionString = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
+    const timeoutMs = process.env.VERCEL ? 4500 : 10000;
     if (connectionString) {
       global._postgresPool = new Pool({
         connectionString,
@@ -16,7 +23,7 @@ export const createPool = () => {
           ? undefined
           : { rejectUnauthorized: false },
         max: 10,
-        connectionTimeoutMillis: 15000,
+        connectionTimeoutMillis: timeoutMs,
       });
     } else {
       global._postgresPool = new Pool({
@@ -25,7 +32,7 @@ export const createPool = () => {
         password: process.env.SQL_PASSWORD,
         database: process.env.SQL_DB_NAME,
         max: 10,
-        connectionTimeoutMillis: 15000,
+        connectionTimeoutMillis: timeoutMs,
       });
     }
 

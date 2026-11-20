@@ -5,7 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
-import { db } from './src/db/index.ts';
+import { db, hasPostgresConfig } from './src/db/index.ts';
 import {
   addresses,
   backups,
@@ -48,9 +48,14 @@ import {
   updateBackupSettings,
 } from './src/lib/backup-service.ts';
 import { isMailerConfigured, sendOtpEmail } from './src/lib/mailer.ts';
+import { fetchCatalogFromSupabase } from './src/lib/supabase-catalog.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const resolvedDirname =
+  typeof __dirname !== 'undefined'
+    ? __dirname
+    : import.meta.url
+    ? path.dirname(fileURLToPath(import.meta.url))
+    : process.cwd();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -566,59 +571,83 @@ app.post('/api/auth/change-password', requireAuth, async (req: AuthRequest, res)
 // ==================== CATALOG & REVIEWS ====================
 
 app.get('/api/catalog', async (req, res) => {
+  const { category, subcategory, brand, collection, q, sort } = req.query;
+
+  if (hasPostgresConfig()) {
+    try {
+      await ensureSeeded();
+
+      const conditions = [];
+      if (category && category !== 'all') {
+        conditions.push(eq(products.categoryGroup, String(category)));
+      }
+      if (subcategory && subcategory !== 'all') {
+        conditions.push(eq(products.subcategory, String(subcategory)));
+      }
+      if (brand && brand !== 'all') {
+        conditions.push(eq(products.brandSlug, String(brand)));
+      }
+      if (collection === 'featured') conditions.push(eq(products.isFeatured, true));
+      if (collection === 'bestseller') conditions.push(eq(products.isBestSeller, true));
+      if (collection === 'new') conditions.push(eq(products.isNewArrival, true));
+      if (collection === 'offer') conditions.push(eq(products.isSpecialOffer, true));
+      if (q && String(q).trim()) {
+        const term = `%${String(q).trim()}%`;
+        conditions.push(
+          or(
+            ilike(products.name, term),
+            ilike(products.brandName, term),
+            ilike(products.subcategory, term),
+            ilike(products.description, term)
+          )
+        );
+      }
+
+      const [allCategories, allBrands, productRows, recentReviews] = await Promise.all([
+        db.select().from(categories).orderBy(categories.sortOrder, categories.name),
+        db.select().from(brands).orderBy(brands.name),
+        conditions.length
+          ? db.select().from(products).where(and(...conditions)).orderBy(desc(products.id))
+          : db.select().from(products).orderBy(desc(products.id)),
+        db.select().from(reviews).orderBy(desc(reviews.createdAt)).limit(8),
+      ]);
+
+      const sortedProducts = [...productRows];
+      if (sort === 'price_asc') sortedProducts.sort((a, b) => a.priceGhs - b.priceGhs);
+      else if (sort === 'price_desc') sortedProducts.sort((a, b) => b.priceGhs - a.priceGhs);
+
+      return res.json({
+        categories: allCategories,
+        brands: allBrands,
+        products: sortedProducts,
+        recentReviews,
+        paystackConfigured: Boolean(process.env.PAYSTACK_SECRET_KEY),
+      });
+    } catch (pgError) {
+      console.error('Postgres catalog load failed, falling back to Supabase REST:', pgError);
+    }
+  }
+
   try {
-    await ensureSeeded();
-    const { category, subcategory, brand, collection, q, sort } = req.query;
-
-    const conditions = [];
-    if (category && category !== 'all') {
-      conditions.push(eq(products.categoryGroup, String(category)));
-    }
-    if (subcategory && subcategory !== 'all') {
-      conditions.push(eq(products.subcategory, String(subcategory)));
-    }
-    if (brand && brand !== 'all') {
-      conditions.push(eq(products.brandSlug, String(brand)));
-    }
-    if (collection === 'featured') conditions.push(eq(products.isFeatured, true));
-    if (collection === 'bestseller') conditions.push(eq(products.isBestSeller, true));
-    if (collection === 'new') conditions.push(eq(products.isNewArrival, true));
-    if (collection === 'offer') conditions.push(eq(products.isSpecialOffer, true));
-    if (q && String(q).trim()) {
-      const term = `%${String(q).trim()}%`;
-      conditions.push(
-        or(
-          ilike(products.name, term),
-          ilike(products.brandName, term),
-          ilike(products.subcategory, term),
-          ilike(products.description, term)
-        )
-      );
-    }
-
-    const [allCategories, allBrands, productRows, recentReviews] = await Promise.all([
-      db.select().from(categories).orderBy(categories.sortOrder, categories.name),
-      db.select().from(brands).orderBy(brands.name),
-      conditions.length
-        ? db.select().from(products).where(and(...conditions)).orderBy(desc(products.id))
-        : db.select().from(products).orderBy(desc(products.id)),
-      db.select().from(reviews).orderBy(desc(reviews.createdAt)).limit(8),
-    ]);
-
-    const sortedProducts = [...productRows];
-    if (sort === 'price_asc') sortedProducts.sort((a, b) => a.priceGhs - b.priceGhs);
-    else if (sort === 'price_desc') sortedProducts.sort((a, b) => b.priceGhs - a.priceGhs);
-
-    res.json({
-      categories: allCategories,
-      brands: allBrands,
-      products: sortedProducts,
-      recentReviews,
+    const supabaseCatalog = await fetchCatalogFromSupabase(getSupabaseServerClient(), {
+      category: category ? String(category) : undefined,
+      subcategory: subcategory ? String(subcategory) : undefined,
+      brand: brand ? String(brand) : undefined,
+      collection: collection ? String(collection) : undefined,
+      q: q ? String(q) : undefined,
+      sort: sort ? String(sort) : undefined,
+    });
+    return res.json({
+      ...supabaseCatalog,
       paystackConfigured: Boolean(process.env.PAYSTACK_SECRET_KEY),
     });
-  } catch (error) {
-    console.error('Catalog load error:', error);
-    res.status(500).json({ error: 'Unable to load store catalog. Please try again.' });
+  } catch (supaError: any) {
+    console.error('Catalog load error:', supaError);
+    return res.status(500).json({
+      error:
+        supaError?.message ||
+        'Unable to load store catalog. Verify DATABASE_URL or Supabase table permissions.',
+    });
   }
 });
 
@@ -1839,7 +1868,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(__dirname, 'dist');
+    const distPath = path.resolve(resolvedDirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
