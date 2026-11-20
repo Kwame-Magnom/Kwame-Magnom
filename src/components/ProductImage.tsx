@@ -24,11 +24,13 @@ const CATEGORY_FALLBACK_IMG: Record<string, string> = {
 
 export function resolveProductImageSrc(src: string, categoryGroup = 'iphones'): string {
   const trimmed = (src || '').trim();
+  const groupKey = (categoryGroup || 'iphones').toLowerCase();
   if (!trimmed) {
-    return CATEGORY_FALLBACK_IMG[categoryGroup] || iphoneFlagshipImg;
+    return CATEGORY_FALLBACK_IMG[groupKey] || iphoneFlagshipImg;
   }
+  const lower = trimmed.toLowerCase();
   for (const [filename, bundledUrl] of Object.entries(BUNDLED_IMAGE_MAP)) {
-    if (trimmed.includes(filename)) {
+    if (lower.includes(filename.toLowerCase())) {
       return bundledUrl;
     }
   }
@@ -48,8 +50,9 @@ export const ProductImage: React.FC<ProductImageProps> = ({
   categoryGroup = 'iphones',
   className,
 }) => {
-  const primarySrc = resolveProductImageSrc(src, categoryGroup);
-  const fallbackSrc = CATEGORY_FALLBACK_IMG[categoryGroup] || iphoneFlagshipImg;
+  const groupKey = (categoryGroup || 'iphones').toLowerCase();
+  const primarySrc = resolveProductImageSrc(src, groupKey);
+  const fallbackSrc = CATEGORY_FALLBACK_IMG[groupKey] || iphoneFlagshipImg;
 
   const [currentSrc, setCurrentSrc] = useState(primarySrc);
   const [failed, setFailed] = useState(false);
