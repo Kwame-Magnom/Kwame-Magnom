@@ -170,6 +170,27 @@ export const newsletterSubscribers = pgTable('newsletter_subscribers', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+export const backups = pgTable('backups', {
+  id: serial('id').primaryKey(),
+  backupCode: text('backup_code').notNull().unique(),
+  triggerType: text('trigger_type').notNull().default('auto'), // 'auto' | 'manual' | 'pre_restore'
+  createdByEmail: text('created_by_email').notNull().default('system-scheduler'),
+  summaryJson: text('summary_json').notNull().default('{}'),
+  snapshotJson: text('snapshot_json').notNull(),
+  sizeBytes: integer('size_bytes').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const backupSettings = pgTable('backup_settings', {
+  id: serial('id').primaryKey(),
+  settingKey: text('setting_key').notNull().unique().default('auto_backup'),
+  enabled: boolean('enabled').notNull().default(true),
+  intervalHours: integer('interval_hours').notNull().default(24),
+  retentionCount: integer('retention_count').notNull().default(14),
+  lastRunAt: timestamp('last_run_at'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
 // Relations
 export const usersRelations = relations(users, ({ many }) => ({
   addresses: many(addresses),

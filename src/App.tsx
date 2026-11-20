@@ -183,7 +183,7 @@ export default function App() {
 
   const handleAuthenticated = async (authedUser: UserProfile) => {
     setUser(authedUser);
-    if (authedUser.role === 'admin') {
+    if (authedUser.role === 'admin' || authedUser.role === 'staff') {
       setViewMode('admin');
     }
     // Push any guest cart items into DB cart
@@ -423,14 +423,16 @@ export default function App() {
 
             {user ? (
               <div className="flex items-center gap-2 shrink-0">
-                {user.role === 'admin' && (
+                {(user.role === 'admin' || user.role === 'staff') && (
                   <Button
                     size="sm"
                     variant={viewMode === 'admin' ? 'accent' : 'outline'}
                     onClick={() => setViewMode(viewMode === 'admin' ? 'store' : 'admin')}
                   >
                     <LayoutDashboard className="h-3.5 w-3.5" />
-                    <span className="hidden sm:inline">Admin</span>
+                    <span className="hidden sm:inline">
+                      {user.role === 'admin' ? 'Admin' : 'Staff'}
+                    </span>
                   </Button>
                 )}
                 <Button
@@ -495,8 +497,9 @@ export default function App() {
             onToggleWishlist={handleToggleWishlist}
             onLogout={handleLogout}
           />
-        ) : viewMode === 'admin' && user?.role === 'admin' ? (
+        ) : viewMode === 'admin' && user && (user.role === 'admin' || user.role === 'staff') ? (
           <AdminDashboard
+            currentUser={user}
             onBackToStore={() => setViewMode('store')}
             onCatalogMutated={loadCatalog}
           />
@@ -1065,7 +1068,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    if (user?.role === 'admin') setViewMode('admin');
+                    if (user?.role === 'admin' || user?.role === 'staff') setViewMode('admin');
                     else {
                       setAuthInitialMode('login');
                       setAuthModalOpen(true);

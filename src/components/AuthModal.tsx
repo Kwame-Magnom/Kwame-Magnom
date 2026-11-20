@@ -43,6 +43,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   // OTP / Reset
   const [otp, setOtp] = useState('');
+  const [otpPurpose, setOtpPurpose] = useState<'verify_email' | 'login_otp'>('verify_email');
   const [previewOtp, setPreviewOtp] = useState<string | null>(null);
   const [cooldown, setCooldown] = useState(0);
 
@@ -87,16 +88,38 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     e.preventDefault();
     setLoading(true);
     try {
-      const data = await apiFetch<{ token: string; user: UserProfile }>('/api/auth/login', {
+      const data = await apiFetch<{
+        token?: string;
+        user?: UserProfile;
+        requiresOtp?: boolean;
+        purpose?: 'verify_email' | 'login_otp';
+        previewOtp?: string;
+        message?: string;
+      }>('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ email, password }),
       });
-      setSessionToken(data.token);
-      toast.success(`Welcome back, ${data.user.fullName}`);
-      onAuthenticated(data.user);
-      onOpenChange(false);
+
+      if (data.requiresOtp) {
+        setOtp('');
+        setOtpPurpose(data.purpose || 'login_otp');
+        setPreviewOtp(data.previewOtp || null);
+        setCooldown(25);
+        setView('verify');
+        toast.success(data.message || 'A 6-digit OTP has been sent to your email.');
+        return;
+      }
+
+      if (data.token && data.user) {
+        setSessionToken(data.token);
+        toast.success(`Welcome back, ${data.user.fullName}`);
+        onAuthenticated(data.user);
+        onOpenChange(false);
+      }
     } catch (err: any) {
       if (err?.data?.requiresVerification) {
+        setOtp('');
+        setOtpPurpose('verify_email');
         setPreviewOtp(err.data.previewOtp || null);
         setView('verify');
         toast.info('Please verify your email with the 6-digit OTP.');
@@ -126,10 +149,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           confirmPassword,
         }),
       });
+      setOtp('');
+      setOtpPurpose('verify_email');
       setPreviewOtp(data.previewOtp || null);
       setCooldown(25);
       setView('verify');
-      toast.success('Account created! Enter the 6-digit verification code.');
+      toast.success(data.message || 'Account created! Check your email for the 6-digit OTP.');
     } catch (err: any) {
       toast.error(err?.message || 'Registration failed.');
     } finally {
@@ -146,7 +171,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         body: JSON.stringify({ email, otp }),
       });
       setSessionToken(data.token);
-      toast.success('Email verified! Your account is ready.');
+      toast.success(
+        otpPurpose === 'login_otp'
+          ? `Welcome back, ${data.user.fullName}`
+          : 'Email verified! Your account is ready.'
+      );
       onAuthenticated(data.user);
       onOpenChange(false);
     } catch (err: any) {
@@ -156,7 +185,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  const handleResendOtp = async (purpose: 'verify_email' | 'reset_password') => {
+  const handleResendOtp = async (purpose: 'verify_email' | 'login_otp' | 'reset_password') => {
     if (cooldown > 0) return;
     setLoading(true);
     try {
@@ -231,7 +260,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           <DialogTitle>
             {view === 'login' && 'Sign in to MAGNOM PHONES HUB'}
             {view === 'register' && 'Create your Ghana customer account'}
-            {view === 'verify' && 'Verify your email address'}
+            {view === 'verify' &&
+              (otpPurpose === 'login_otp' ? 'Enter Login OTP' : 'Verify your email address')}
             {view === 'forgot' && 'Reset forgotten password'}
             {view === 'reset' && 'Set a new password'}
           </DialogTitle>
@@ -240,7 +270,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               'Access your orders, saved addresses, wishlist, and Paystack checkout.'}
             {view === 'register' &&
               'Register with a valid Ghana phone number and verify your email via OTP.'}
-            {view === 'verify' && `Enter the 6-digit code sent to ${email || 'your email'}.`}
+            {view === 'verify' &&
+              `Enter the 6-digit security code sent to ${email || 'your email'}.`}
             {view === 'forgot' && 'We will generate a 6-digit reset OTP for your email.'}
             {view === 'reset' && 'Enter your 6-digit OTP and choose a strong new password.'}
           </DialogDescription>
@@ -477,7 +508,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <div className="flex items-center justify-between text-xs">
               <button
                 type="button"
-                onClick={() => handleResendOtp('verify_email')}
+                onClick={() => handleResendOtp(otpPurpose)}
                 disabled={cooldown > 0 || loading}
                 className="font-semibold text-[#DC0000] hover:underline disabled:text-slate-400 cursor-pointer"
               >

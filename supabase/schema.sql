@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS public.users (
   full_name TEXT NOT NULL,
   email TEXT NOT NULL UNIQUE,
   phone TEXT DEFAULT '',
-  role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('customer', 'admin')),
+  role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('customer', 'staff', 'admin')),
   password_hash TEXT,
   email_verified BOOLEAN NOT NULL DEFAULT FALSE,
   otp_code_hash TEXT,
@@ -161,6 +161,29 @@ CREATE TABLE IF NOT EXISTS public.newsletter_subscribers (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- 12. DATABASE BACKUPS
+CREATE TABLE IF NOT EXISTS public.backups (
+  id SERIAL PRIMARY KEY,
+  backup_code TEXT NOT NULL UNIQUE,
+  trigger_type TEXT NOT NULL DEFAULT 'auto' CHECK (trigger_type IN ('auto', 'manual', 'pre_restore')),
+  created_by_email TEXT NOT NULL DEFAULT 'system-scheduler',
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  snapshot_json TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 13. BACKUP SETTINGS
+CREATE TABLE IF NOT EXISTS public.backup_settings (
+  id SERIAL PRIMARY KEY,
+  setting_key TEXT NOT NULL UNIQUE DEFAULT 'auto_backup',
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  interval_hours INTEGER NOT NULL DEFAULT 24 CHECK (interval_hours > 0),
+  retention_count INTEGER NOT NULL DEFAULT 14 CHECK (retention_count > 0),
+  last_run_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- ============================================================================
 -- PERFORMANCE INDEXES
 -- ============================================================================
@@ -220,6 +243,8 @@ ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.order_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.reviews ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.newsletter_subscribers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.backups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.backup_settings ENABLE ROW LEVEL SECURITY;
 
 -- Public storefront read access
 DROP POLICY IF EXISTS "Public read categories" ON public.categories;

@@ -167,7 +167,8 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
             Welcome, {user.fullName}
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            {user.email} · {user.phone || 'No Ghana phone added'} ·{' '}
+            {user.email} · {user.phone || 'No Ghana phone added'} · Role:{' '}
+            <span className="capitalize font-semibold text-[#001B5E]">{user.role}</span> ·{' '}
             <span className="text-emerald-700 font-semibold">
               {user.emailVerified ? 'Verified Account' : 'Unverified Email'}
             </span>

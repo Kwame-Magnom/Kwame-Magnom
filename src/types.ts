@@ -4,9 +4,39 @@ export interface UserProfile {
   fullName: string;
   email: string;
   phone: string;
-  role: 'customer' | 'admin' | string;
+  role: 'customer' | 'staff' | 'admin' | string;
   emailVerified: boolean;
   createdAt?: string;
+}
+
+export interface BackupSettings {
+  id?: number;
+  settingKey: string;
+  enabled: boolean;
+  intervalHours: number;
+  retentionCount: number;
+  lastRunAt: string | null;
+  updatedAt?: string;
+}
+
+export interface BackupSummary {
+  categories: number;
+  brands: number;
+  products: number;
+  orders: number;
+  reviews: number;
+  users: number;
+  newsletterSubscribers: number;
+}
+
+export interface BackupRecord {
+  id: number;
+  backupCode: string;
+  triggerType: 'auto' | 'manual' | 'pre_restore' | string;
+  createdByEmail: string;
+  summary: BackupSummary;
+  sizeBytes: number;
+  createdAt: string;
 }
 
 export interface CategoryItem {

@@ -1,9 +1,27 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
+import {
+  ArrowLeft,
+  DatabaseBackup,
+  Download,
+  Plus,
+  RotateCcw,
+  ShieldCheck,
+  Trash2,
+  UserPlus,
+} from 'lucide-react';
 import { toast } from 'sonner';
-import { apiFetch } from '@/src/lib/api';
+import { apiFetch, getStoredSessionToken } from '@/src/lib/api';
+import { auth } from '@/src/lib/firebase';
 import { formatGhs, GHANA_REGIONS } from '@/src/lib/utils';
-import { BrandItem, CategoryItem, OrderRecord, ProductItem, UserProfile } from '@/src/types';
+import {
+  BackupRecord,
+  BackupSettings,
+  BrandItem,
+  CategoryItem,
+  OrderRecord,
+  ProductItem,
+  UserProfile,
+} from '@/src/types';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -16,14 +34,17 @@ import {
 } from './ui/dialog';
 
 interface AdminDashboardProps {
+  currentUser: UserProfile;
   onBackToStore: () => void;
   onCatalogMutated: () => void;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
+  currentUser,
   onBackToStore,
   onCatalogMutated,
 }) => {
+  const isSuperAdmin = currentUser.role === 'admin';
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({
     totalRevenueGhs: 0,
@@ -80,6 +101,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [newBrandName, setNewBrandName] = useState('');
   const [newBrandGroup, setNewBrandGroup] = useState('android');
 
+  // User Role Management
+  const [userSearch, setUserSearch] = useState('');
+  const [addUserOpen, setAddUserOpen] = useState(false);
+  const [uFullName, setUFullName] = useState('');
+  const [uEmail, setUEmail] = useState('');
+  const [uPhone, setUPhone] = useState('');
+  const [uPassword, setUPassword] = useState('');
+  const [uRole, setURole] = useState<'customer' | 'staff' | 'admin'>('staff');
+
+  // Automated Backups
+  const [backupsList, setBackupsList] = useState<BackupRecord[]>([]);
+  const [backupSettings, setBackupSettings] = useState<BackupSettings>({
+    settingKey: 'auto_backup',
+    enabled: true,
+    intervalHours: 24,
+    retentionCount: 14,
+    lastRunAt: null,
+  });
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState<BackupRecord | null>(null);
+
+  const loadBackups = async () => {
+    if (!isSuperAdmin) return;
+    try {
+      const bData = await apiFetch<{ settings: BackupSettings; backups: BackupRecord[] }>(
+        '/api/admin/backups'
+      );
+      if (bData.settings) setBackupSettings(bData.settings);
+      setBackupsList(bData.backups || []);
+    } catch {
+      // ignore if non-admin
+    }
+  };
+
   const loadOverview = async () => {
     setLoading(true);
     try {
@@ -90,6 +145,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setCategories(data.categories || []);
       setBrands(data.brands || []);
       setCustomers(data.customers || []);
+      if (isSuperAdmin) {
+        await loadBackups();
+      }
     } catch (err: any) {
       toast.error(err?.message || 'Unable to load admin console.');
     } finally {
@@ -300,6 +358,130 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const handleUpdateUserRole = async (
+    targetUserId: number,
+    payload: { role?: string; emailVerified?: boolean }
+  ) => {
+    try {
+      const res = await apiFetch<{ user: UserProfile }>(`/api/admin/users/${targetUserId}/role`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      });
+      setCustomers((prev) => prev.map((u) => (u.id === targetUserId ? res.user : u)));
+      toast.success('User role & permissions updated.');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to update user role.');
+    }
+  };
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await apiFetch<{ user: UserProfile }>('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          fullName: uFullName,
+          email: uEmail,
+          phone: uPhone,
+          password: uPassword,
+          role: uRole,
+        }),
+      });
+      setCustomers((prev) => [res.user, ...prev]);
+      setAddUserOpen(false);
+      setUFullName('');
+      setUEmail('');
+      setUPhone('');
+      setUPassword('');
+      setURole('staff');
+      toast.success(`Account created with ${res.user.role} role.`);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to create account.');
+    }
+  };
+
+  const handleSaveBackupSettings = async () => {
+    setBackupBusy(true);
+    try {
+      const res = await apiFetch<{ settings: BackupSettings }>('/api/admin/backups/settings', {
+        method: 'PUT',
+        body: JSON.stringify({
+          enabled: backupSettings.enabled,
+          intervalHours: Number(backupSettings.intervalHours),
+          retentionCount: Number(backupSettings.retentionCount),
+        }),
+      });
+      setBackupSettings(res.settings);
+      toast.success('Auto-backup schedule saved.');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to save schedule.');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleRunManualBackup = async () => {
+    setBackupBusy(true);
+    try {
+      await apiFetch('/api/admin/backups/run', { method: 'POST' });
+      toast.success('Database backup snapshot created.');
+      await loadBackups();
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to create backup.');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleDownloadBackup = async (b: BackupRecord) => {
+    try {
+      const token =
+        getStoredSessionToken() || (auth.currentUser ? await auth.currentUser.getIdToken() : '');
+      const resp = await fetch(`/api/admin/backups/${b.id}/download`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!resp.ok) throw new Error('Download failed.');
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${b.backupCode}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Downloaded ${b.backupCode}.json`);
+    } catch {
+      toast.error('Unable to download backup file.');
+    }
+  };
+
+  const handleConfirmRestore = async () => {
+    if (!restoreTarget) return;
+    setBackupBusy(true);
+    try {
+      await apiFetch(`/api/admin/backups/${restoreTarget.id}/restore`, { method: 'POST' });
+      toast.success(`Catalog restored from ${restoreTarget.backupCode} (pre-restore backup saved).`);
+      setRestoreTarget(null);
+      await loadOverview();
+      onCatalogMutated();
+    } catch (err: any) {
+      toast.error(err?.message || 'Restore failed.');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleDeleteBackup = async (backupId: number) => {
+    try {
+      await apiFetch(`/api/admin/backups/${backupId}`, { method: 'DELETE' });
+      toast.success('Backup deleted.');
+      await loadBackups();
+    } catch {
+      toast.error('Failed to delete backup.');
+    }
+  };
+
   return (
     <section className="max-w-7xl mx-auto px-4 sm:px-6 py-10 space-y-8">
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-5">
@@ -355,7 +537,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <TabsTrigger value="products">Products ({products.length})</TabsTrigger>
             <TabsTrigger value="orders">Orders ({orders.length})</TabsTrigger>
             <TabsTrigger value="taxonomy">Categories &amp; Brands</TabsTrigger>
-            <TabsTrigger value="customers">Customers ({customers.length})</TabsTrigger>
+            <TabsTrigger value="customers">Users &amp; Roles ({customers.length})</TabsTrigger>
+            {isSuperAdmin && (
+              <TabsTrigger value="backups">Auto Backups ({backupsList.length})</TabsTrigger>
+            )}
           </TabsList>
 
           <TabsContent value="products">
@@ -610,7 +795,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </TabsContent>
 
-          <TabsContent value="customers">
+          <TabsContent value="customers" className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <Input
+                value={userSearch}
+                onChange={(e) => setUserSearch(e.target.value)}
+                placeholder="Search users by name, email, or role..."
+                className="max-w-xs"
+              />
+              {isSuperAdmin && (
+                <Button size="sm" variant="accent" onClick={() => setAddUserOpen(true)}>
+                  <UserPlus className="h-3.5 w-3.5" />
+                  Add Staff / User
+                </Button>
+              )}
+            </div>
+
             <div className="rounded-xl border border-slate-200 bg-white overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
@@ -618,30 +818,254 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <th className="py-3 px-4 font-semibold">Name</th>
                     <th className="py-3 px-4 font-semibold">Email</th>
                     <th className="py-3 px-4 font-semibold">Ghana Phone</th>
-                    <th className="py-3 px-4 font-semibold">Verified</th>
+                    <th className="py-3 px-4 font-semibold">Verification</th>
                     <th className="py-3 px-4 font-semibold">Role</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {customers.map((c) => (
-                    <tr key={c.id} className="border-b border-slate-100">
-                      <td className="py-3 px-4 font-semibold text-slate-900">{c.fullName}</td>
-                      <td className="py-3 px-4 text-slate-600">{c.email}</td>
-                      <td className="py-3 px-4 font-mono-nums text-slate-600">
-                        {c.phone || '—'}
-                      </td>
-                      <td className="py-3 px-4">
-                        {c.emailVerified ? 'Verified' : 'Pending OTP'}
-                      </td>
-                      <td className="py-3 px-4 capitalize font-semibold text-[#001B5E]">
-                        {c.role}
-                      </td>
-                    </tr>
-                  ))}
+                  {customers
+                    .filter((c) => {
+                      if (!userSearch.trim()) return true;
+                      const q = userSearch.toLowerCase();
+                      return (
+                        c.fullName.toLowerCase().includes(q) ||
+                        c.email.toLowerCase().includes(q) ||
+                        c.role.toLowerCase().includes(q)
+                      );
+                    })
+                    .map((c) => {
+                      const isLockedAdmin =
+                        c.id === currentUser.id ||
+                        c.email.toLowerCase() === 'sarpongpatrick2915@gmail.com';
+                      return (
+                        <tr key={c.id} className="border-b border-slate-100 hover:bg-slate-50/70">
+                          <td className="py-3 px-4 font-semibold text-slate-900">
+                            {c.fullName}
+                            {c.id === currentUser.id && (
+                              <span className="ml-1.5 text-[10px] text-[#DC0000]">(You)</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-slate-600">{c.email}</td>
+                          <td className="py-3 px-4 font-mono-nums text-slate-600">
+                            {c.phone || '—'}
+                          </td>
+                          <td className="py-3 px-4">
+                            {isSuperAdmin ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleUpdateUserRole(c.id, { emailVerified: !c.emailVerified })
+                                }
+                                className={`px-2 py-0.5 rounded font-semibold cursor-pointer ${
+                                  c.emailVerified
+                                    ? 'bg-emerald-50 text-emerald-700'
+                                    : 'bg-amber-50 text-amber-700'
+                                }`}
+                              >
+                                {c.emailVerified ? 'Verified' : 'Pending OTP'}
+                              </button>
+                            ) : (
+                              <span>{c.emailVerified ? 'Verified' : 'Pending OTP'}</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4">
+                            {isSuperAdmin ? (
+                              <select
+                                aria-label={`Role for ${c.email}`}
+                                disabled={isLockedAdmin}
+                                value={c.role}
+                                onChange={(e) =>
+                                  handleUpdateUserRole(c.id, { role: e.target.value })
+                                }
+                                className="h-8 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-semibold text-[#001B5E] disabled:opacity-60"
+                              >
+                                <option value="customer">Customer</option>
+                                <option value="staff">Staff (Inventory &amp; Orders)</option>
+                                <option value="admin">Admin (Full Access)</option>
+                              </select>
+                            ) : (
+                              <span className="capitalize font-semibold text-[#001B5E]">
+                                {c.role}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                 </tbody>
               </table>
             </div>
           </TabsContent>
+
+          {isSuperAdmin && (
+            <TabsContent value="backups" className="space-y-6">
+              <div className="rounded-xl border border-slate-200 bg-white p-6 space-y-5">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-base font-bold text-[#001B5E] flex items-center gap-2">
+                      <DatabaseBackup className="h-4 w-4 text-[#DC0000]" />
+                      Automated Store Backup Schedule
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Automatically snapshots products, categories, brands, orders, reviews, and user metadata.
+                      Last automated/manual run:{' '}
+                      <strong className="text-[#001B5E]">
+                        {backupSettings.lastRunAt
+                          ? new Date(backupSettings.lastRunAt).toLocaleString()
+                          : 'Never'}
+                      </strong>
+                    </p>
+                  </div>
+                  <Button
+                    variant="accent"
+                    size="sm"
+                    disabled={backupBusy}
+                    onClick={handleRunManualBackup}
+                  >
+                    <DatabaseBackup className="h-3.5 w-3.5" />
+                    {backupBusy ? 'Working...' : 'Run Backup Now'}
+                  </Button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 items-end border-t border-slate-100 pt-4">
+                  <label className="flex items-center gap-2.5 h-10 px-3 rounded-lg border border-slate-200 bg-slate-50 cursor-pointer text-xs font-semibold text-slate-800">
+                    <input
+                      type="checkbox"
+                      checked={backupSettings.enabled}
+                      onChange={(e) =>
+                        setBackupSettings((s) => ({ ...s, enabled: e.target.checked }))
+                      }
+                    />
+                    Auto-Backup Enabled
+                  </label>
+
+                  <div className="space-y-1">
+                    <Label>Backup Frequency</Label>
+                    <select
+                      value={backupSettings.intervalHours}
+                      onChange={(e) =>
+                        setBackupSettings((s) => ({
+                          ...s,
+                          intervalHours: Number(e.target.value),
+                        }))
+                      }
+                      className="flex h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-900"
+                    >
+                      <option value={6}>Every 6 Hours</option>
+                      <option value={12}>Every 12 Hours</option>
+                      <option value={24}>Every 24 Hours (Daily)</option>
+                      <option value={168}>Every 7 Days (Weekly)</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label>Keep Auto Snapshots</Label>
+                    <select
+                      value={backupSettings.retentionCount}
+                      onChange={(e) =>
+                        setBackupSettings((s) => ({
+                          ...s,
+                          retentionCount: Number(e.target.value),
+                        }))
+                      }
+                      className="flex h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-900"
+                    >
+                      <option value={7}>Last 7 Auto Backups</option>
+                      <option value={14}>Last 14 Auto Backups</option>
+                      <option value={30}>Last 30 Auto Backups</option>
+                      <option value={60}>Last 60 Auto Backups</option>
+                    </select>
+                  </div>
+
+                  <Button variant="outline" disabled={backupBusy} onClick={handleSaveBackupSettings}>
+                    Save Schedule
+                  </Button>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-white overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-slate-500">
+                      <th className="py-3 px-4 font-semibold">Snapshot Code</th>
+                      <th className="py-3 px-4 font-semibold">Trigger</th>
+                      <th className="py-3 px-4 font-semibold">Records</th>
+                      <th className="py-3 px-4 font-semibold">Size</th>
+                      <th className="py-3 px-4 font-semibold">Created</th>
+                      <th className="py-3 px-4 font-semibold text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {backupsList.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-8 text-center text-slate-500">
+                          No backup snapshots stored yet. Click Run Backup Now to create your first snapshot.
+                        </td>
+                      </tr>
+                    ) : (
+                      backupsList.map((b) => (
+                        <tr key={b.id} className="border-b border-slate-100 hover:bg-slate-50/70">
+                          <td className="py-3 px-4">
+                            <p className="font-mono-nums font-bold text-[#001B5E]">{b.backupCode}</p>
+                            <p className="text-[11px] text-slate-400">{b.createdByEmail}</p>
+                          </td>
+                          <td className="py-3 px-4 uppercase font-semibold text-[11px]">
+                            <span
+                              className={`px-2 py-0.5 rounded ${
+                                b.triggerType === 'auto'
+                                  ? 'bg-[#001B5E]/10 text-[#001B5E]'
+                                  : b.triggerType === 'pre_restore'
+                                  ? 'bg-amber-50 text-amber-700'
+                                  : 'bg-red-50 text-[#DC0000]'
+                              }`}
+                            >
+                              {b.triggerType}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-slate-600 font-mono-nums">
+                            {b.summary.products} SKUs · {b.summary.orders} orders · {b.summary.users}{' '}
+                            users
+                          </td>
+                          <td className="py-3 px-4 font-mono-nums text-slate-700">
+                            {(b.sizeBytes / 1024).toFixed(1)} KB
+                          </td>
+                          <td className="py-3 px-4 text-slate-600">
+                            {new Date(b.createdAt).toLocaleString()}
+                          </td>
+                          <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleDownloadBackup(b)}
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              JSON
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setRestoreTarget(b)}
+                            >
+                              <RotateCcw className="h-3.5 w-3.5" />
+                              Restore
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="text-red-600 hover:text-red-700"
+                              onClick={() => handleDeleteBackup(b.id)}
+                            >
+                              Delete
+                            </Button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </TabsContent>
+          )}
         </Tabs>
       )}
 
@@ -955,6 +1379,102 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               Create Order
             </Button>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Staff / User Dialog */}
+      <Dialog open={addUserOpen} onOpenChange={setAddUserOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Create Staff or Customer Account</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleCreateUser} className="space-y-3.5">
+            <div className="space-y-1">
+              <Label>Full Name</Label>
+              <Input
+                required
+                value={uFullName}
+                onChange={(e) => setUFullName(e.target.value)}
+                placeholder="Ama Mensah"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label>Email Address</Label>
+              <Input
+                type="email"
+                required
+                value={uEmail}
+                onChange={(e) => setUEmail(e.target.value)}
+                placeholder="staff@magnomphones.gh"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label>Ghana Phone (Optional)</Label>
+              <Input
+                value={uPhone}
+                onChange={(e) => setUPhone(e.target.value)}
+                placeholder="0241234567"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label>Role</Label>
+                <select
+                  value={uRole}
+                  onChange={(e) => setURole(e.target.value as 'customer' | 'staff' | 'admin')}
+                  className="flex h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm"
+                >
+                  <option value="staff">Staff</option>
+                  <option value="admin">Admin</option>
+                  <option value="customer">Customer</option>
+                </select>
+              </div>
+              <div className="space-y-1">
+                <Label>Temporary Password</Label>
+                <Input
+                  type="password"
+                  required
+                  minLength={8}
+                  value={uPassword}
+                  onChange={(e) => setUPassword(e.target.value)}
+                  placeholder="Min 8 chars"
+                />
+              </div>
+            </div>
+            <Button type="submit" variant="accent" className="w-full">
+              <ShieldCheck className="h-4 w-4" />
+              Create Account
+            </Button>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Restore Backup Confirmation Dialog */}
+      <Dialog open={Boolean(restoreTarget)} onOpenChange={(o) => !o && setRestoreTarget(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Restore Catalog from Snapshot?</DialogTitle>
+          </DialogHeader>
+          {restoreTarget && (
+            <div className="space-y-4 text-xs text-slate-600">
+              <p>
+                You are about to restore categories, brands, products, and newsletter records from{' '}
+                <strong className="text-[#001B5E] font-mono-nums">{restoreTarget.backupCode}</strong>.
+              </p>
+              <p className="rounded-lg bg-slate-50 border border-slate-200 p-3 text-slate-700">
+                A <strong className="text-[#001B5E]">pre-restore safety snapshot</strong> will be
+                captured automatically before applying this restore.
+              </p>
+              <div className="flex items-center justify-end gap-2">
+                <Button variant="outline" onClick={() => setRestoreTarget(null)}>
+                  Cancel
+                </Button>
+                <Button variant="accent" disabled={backupBusy} onClick={handleConfirmRestore}>
+                  {backupBusy ? 'Restoring...' : 'Confirm Restore'}
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </section>

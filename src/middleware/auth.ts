@@ -135,3 +135,14 @@ export const requireAdmin = (req: AuthRequest, res: Response, next: NextFunction
   }
   return next();
 };
+
+export const requireStaffOrAdmin = (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (!req.authUser) {
+    return res.status(401).json({ error: 'Authentication required.' });
+  }
+  if (req.authUser.role !== 'admin' && req.authUser.role !== 'staff') {
+    return res.status(403).json({ error: 'Staff or Administrator privileges required.' });
+  }
+  return next();
+};
+

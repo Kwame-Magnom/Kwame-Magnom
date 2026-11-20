@@ -8,6 +8,7 @@ import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { db } from './src/db/index.ts';
 import {
   addresses,
+  backups,
   brands,
   cartItems,
   categories,
@@ -34,9 +35,19 @@ import {
   AuthRequest,
   requireAdmin,
   requireAuth,
+  requireStaffOrAdmin,
   requireVerifiedEmail,
 } from './src/middleware/auth.ts';
 import { getSupabaseServerClient, isSupabaseConfigured } from './src/lib/supabase-server.ts';
+import {
+  createDatabaseBackup,
+  ensureBackupSettings,
+  restoreDatabaseBackup,
+  runAutoBackupIfDue,
+  startBackupScheduler,
+  updateBackupSettings,
+} from './src/lib/backup-service.ts';
+import { isMailerConfigured, sendOtpEmail } from './src/lib/mailer.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -80,6 +91,7 @@ app.get('/api/health', (_req, res) => {
     ok: true,
     service: 'MAGNOM PHONES HUB API',
     supabaseConfigured: isSupabaseConfigured(),
+    smtpConfigured: isMailerConfigured(),
   });
 });
 
@@ -166,11 +178,21 @@ app.post('/api/auth/register', async (req, res) => {
       })
       .returning();
 
+    const mailRes = await sendOtpEmail({
+      toEmail: created.email,
+      fullName: created.fullName,
+      otp,
+      purpose: 'verify_email',
+    });
+
     res.status(201).json({
-      message: 'Account created. Please enter the 6-digit verification code sent to your email.',
+      message: mailRes.sent
+        ? 'Account created! A 6-digit verification code has been sent to your email.'
+        : 'Account created, but email delivery failed. Please click Resend OTP.',
       requiresVerification: true,
+      emailSent: mailRes.sent,
       email: created.email,
-      previewOtp: otp,
+      ...(mailRes.sent || isMailerConfigured() ? {} : { previewOtp: otp }),
     });
   } catch (error) {
     console.error('Register error:', error);
@@ -195,8 +217,12 @@ app.post('/api/auth/verify-otp', async (req, res) => {
       return res.status(404).json({ error: 'Account not found.' });
     }
     const user = found[0];
-    if (!user.otpCodeHash || !user.otpExpiresAt || user.otpPurpose !== 'verify_email') {
-      return res.status(400).json({ error: 'No pending verification code. Please request a new OTP.' });
+    if (
+      !user.otpCodeHash ||
+      !user.otpExpiresAt ||
+      (user.otpPurpose !== 'verify_email' && user.otpPurpose !== 'login_otp')
+    ) {
+      return res.status(400).json({ error: 'No pending OTP verification code. Please request a new OTP.' });
     }
     if (user.otpExpiresAt.getTime() < Date.now()) {
       return res.status(400).json({ error: 'Verification code has expired. Please resend OTP.' });
@@ -259,19 +285,38 @@ app.post('/api/auth/resend-otp', async (req, res) => {
 
     const otp = generateNumericOtp();
     const otpHash = hashOtp(normalizedEmail, otp);
+    const resolvedPurpose =
+      purpose === 'reset_password'
+        ? 'reset_password'
+        : purpose === 'login_otp'
+        ? 'login_otp'
+        : 'verify_email';
+
     await db
       .update(users)
       .set({
         otpCodeHash: otpHash,
-        otpPurpose: purpose === 'reset_password' ? 'reset_password' : 'verify_email',
+        otpPurpose: resolvedPurpose,
         otpExpiresAt: new Date(Date.now() + 15 * 60 * 1000),
         otpLastSentAt: new Date(),
       })
       .where(eq(users.id, user.id));
 
+    const mailRes = await sendOtpEmail({
+      toEmail: user.email,
+      fullName: user.fullName,
+      otp,
+      purpose: resolvedPurpose,
+    });
+
+    if (!mailRes.sent && isMailerConfigured()) {
+      return res.status(502).json({ error: mailRes.error || 'Failed to send OTP email.' });
+    }
+
     res.json({
       message: 'A new 6-digit OTP code has been sent to your email.',
-      previewOtp: otp,
+      emailSent: mailRes.sent,
+      ...(mailRes.sent || isMailerConfigured() ? {} : { previewOtp: otp }),
     });
   } catch (error) {
     console.error('Resend OTP error:', error);
@@ -302,37 +347,41 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
-    if (!user.emailVerified) {
-      const otp = generateNumericOtp();
-      const otpHash = hashOtp(normalizedEmail, otp);
-      await db
-        .update(users)
-        .set({
-          otpCodeHash: otpHash,
-          otpPurpose: 'verify_email',
-          otpExpiresAt: new Date(Date.now() + 15 * 60 * 1000),
-          otpLastSentAt: new Date(),
-        })
-        .where(eq(users.id, user.id));
+    const purpose = user.emailVerified ? 'login_otp' : 'verify_email';
+    const otp = generateNumericOtp();
+    const otpHash = hashOtp(normalizedEmail, otp);
 
-      return res.status(403).json({
-        error: 'Email verification required before signing in.',
-        requiresVerification: true,
-        email: user.email,
-        previewOtp: otp,
+    await db
+      .update(users)
+      .set({
+        otpCodeHash: otpHash,
+        otpPurpose: purpose,
+        otpExpiresAt: new Date(Date.now() + 15 * 60 * 1000),
+        otpLastSentAt: new Date(),
+      })
+      .where(eq(users.id, user.id));
+
+    const mailRes = await sendOtpEmail({
+      toEmail: user.email,
+      fullName: user.fullName,
+      otp,
+      purpose,
+    });
+
+    if (!mailRes.sent && isMailerConfigured()) {
+      return res.status(502).json({
+        error: mailRes.error || 'Could not send login OTP to your email. Please try again.',
       });
     }
 
-    const token = signSessionToken({
-      userId: user.id,
-      uid: user.uid,
+    return res.json({
+      requiresOtp: true,
+      requiresVerification: !user.emailVerified,
+      purpose,
       email: user.email,
-      role: user.role,
-    });
-
-    res.json({
-      token,
-      user: sanitizeUser(user),
+      emailSent: mailRes.sent,
+      message: 'A 6-digit verification code has been sent to your email.',
+      ...(mailRes.sent || isMailerConfigured() ? {} : { previewOtp: otp }),
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -373,9 +422,21 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       })
       .where(eq(users.id, found[0].id));
 
+    const mailRes = await sendOtpEmail({
+      toEmail: found[0].email,
+      fullName: found[0].fullName,
+      otp,
+      purpose: 'reset_password',
+    });
+
+    if (!mailRes.sent && isMailerConfigured()) {
+      return res.status(502).json({ error: mailRes.error || 'Failed to send password reset OTP.' });
+    }
+
     res.json({
-      message: 'Password reset OTP generated for your email.',
-      previewOtp: otp,
+      message: 'A 6-digit password reset OTP has been sent to your email.',
+      emailSent: mailRes.sent,
+      ...(mailRes.sent || isMailerConfigured() ? {} : { previewOtp: otp }),
     });
   } catch (error) {
     console.error('Forgot password error:', error);
@@ -1209,7 +1270,7 @@ app.post('/api/newsletter', async (req, res) => {
 
 // ==================== ADMIN ROUTES ====================
 
-app.get('/api/admin/overview', requireAuth, requireAdmin, async (_req, res) => {
+app.get('/api/admin/overview', requireAuth, requireStaffOrAdmin, async (_req, res) => {
   try {
     await ensureSeeded();
     const [allOrders, allOrderItems, allProducts, allCategories, allBrands, allCustomers] =
@@ -1252,7 +1313,7 @@ app.get('/api/admin/overview', requireAuth, requireAdmin, async (_req, res) => {
   }
 });
 
-app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
+app.post('/api/admin/products', requireAuth, requireStaffOrAdmin, async (req, res) => {
   try {
     const b = req.body || {};
     if (!b.name || !b.categoryGroup || !b.subcategory || !b.brandName || !b.priceGhs) {
@@ -1302,7 +1363,7 @@ app.post('/api/admin/products', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-app.put('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res) => {
+app.put('/api/admin/products/:id', requireAuth, requireStaffOrAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const b = req.body || {};
@@ -1347,7 +1408,7 @@ app.delete('/api/admin/products/:id', requireAuth, requireAdmin, async (req, res
   }
 });
 
-app.post('/api/admin/categories', requireAuth, requireAdmin, async (req, res) => {
+app.post('/api/admin/categories', requireAuth, requireStaffOrAdmin, async (req, res) => {
   try {
     const { name, parentGroup, description } = req.body || {};
     if (!name || !parentGroup) {
@@ -1379,7 +1440,7 @@ app.delete('/api/admin/categories/:id', requireAuth, requireAdmin, async (req, r
   }
 });
 
-app.post('/api/admin/brands', requireAuth, requireAdmin, async (req, res) => {
+app.post('/api/admin/brands', requireAuth, requireStaffOrAdmin, async (req, res) => {
   try {
     const { name, categoryGroup, isPopular } = req.body || {};
     if (!name || !categoryGroup) {
@@ -1410,7 +1471,7 @@ app.delete('/api/admin/brands/:id', requireAuth, requireAdmin, async (req, res) 
   }
 });
 
-app.post('/api/admin/orders', requireAuth, requireAdmin, async (req: AuthRequest, res) => {
+app.post('/api/admin/orders', requireAuth, requireStaffOrAdmin, async (req: AuthRequest, res) => {
   try {
     const {
       productId,
@@ -1506,7 +1567,7 @@ app.post('/api/admin/orders', requireAuth, requireAdmin, async (req: AuthRequest
   }
 });
 
-app.patch('/api/admin/orders/:id', requireAuth, requireAdmin, async (req, res) => {
+app.patch('/api/admin/orders/:id', requireAuth, requireStaffOrAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const { orderStatus, paymentStatus, trackingNote } = req.body || {};
@@ -1538,6 +1599,235 @@ app.delete('/api/admin/orders/:id', requireAuth, requireAdmin, async (req, res) 
   }
 });
 
+// ==================== USER ROLE MANAGEMENT (RBAC) ====================
+
+app.patch('/api/admin/users/:id/role', requireAuth, requireAdmin, async (req: AuthRequest, res) => {
+  try {
+    const targetId = Number(req.params.id);
+    const { role, emailVerified } = req.body || {};
+
+    if (role !== undefined && !['customer', 'staff', 'admin'].includes(String(role))) {
+      return res.status(400).json({ error: 'Role must be customer, staff, or admin.' });
+    }
+
+    const found = await db.select().from(users).where(eq(users.id, targetId)).limit(1);
+    if (!found.length) {
+      return res.status(404).json({ error: 'User account not found.' });
+    }
+    const targetUser = found[0];
+
+    if (role && role !== 'admin') {
+      if (targetUser.id === req.authUser!.id) {
+        return res.status(400).json({ error: 'You cannot demote your own active admin account.' });
+      }
+      if (targetUser.email.toLowerCase() === 'sarpongpatrick2915@gmail.com') {
+        return res.status(400).json({ error: 'Primary store owner admin role cannot be removed.' });
+      }
+    }
+
+    const updateSet: Record<string, any> = {};
+    if (role) updateSet.role = String(role);
+    if (emailVerified !== undefined) updateSet.emailVerified = Boolean(emailVerified);
+
+    const [updated] = await db
+      .update(users)
+      .set(updateSet)
+      .where(eq(users.id, targetId))
+      .returning();
+
+    res.json({ user: sanitizeUser(updated) });
+  } catch (error) {
+    console.error('Update user role error:', error);
+    res.status(500).json({ error: 'Failed to update user role.' });
+  }
+});
+
+app.post('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { fullName, email, phone, password, role = 'staff' } = req.body || {};
+    if (!fullName || !email || !password) {
+      return res.status(400).json({ error: 'Full name, email, and password are required.' });
+    }
+    if (!['customer', 'staff', 'admin'].includes(String(role))) {
+      return res.status(400).json({ error: 'Invalid role selected.' });
+    }
+    if (String(password).length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    }
+
+    const cleanEmail = String(email).toLowerCase().trim();
+    const existing = await db.select().from(users).where(eq(users.email, cleanEmail)).limit(1);
+    if (existing.length) {
+      return res.status(409).json({ error: 'An account with this email already exists.' });
+    }
+
+    const passwordHash = await hashPassword(String(password));
+    const uid = `mph-${crypto.randomBytes(6).toString('hex')}`;
+    const otp = generateNumericOtp();
+    const otpHash = hashOtp(cleanEmail, otp);
+
+    const [created] = await db
+      .insert(users)
+      .values({
+        uid,
+        fullName: String(fullName).trim(),
+        email: cleanEmail,
+        phone: phone ? normalizeGhanaPhone(String(phone)) : '',
+        role: String(role),
+        passwordHash,
+        emailVerified: false,
+        otpCodeHash: otpHash,
+        otpPurpose: 'verify_email',
+        otpExpiresAt: new Date(Date.now() + 15 * 60 * 1000),
+        otpLastSentAt: new Date(),
+      })
+      .returning();
+
+    const mailRes = await sendOtpEmail({
+      toEmail: created.email,
+      fullName: created.fullName,
+      otp,
+      purpose: 'verify_email',
+    });
+
+    res.status(201).json({ user: sanitizeUser(created), emailSent: mailRes.sent });
+  } catch (error) {
+    console.error('Admin create user error:', error);
+    res.status(500).json({ error: 'Failed to create user account.' });
+  }
+});
+
+// ==================== AUTOMATED BACKUPS & RESTORE ====================
+
+app.get('/api/cron/backup', async (req, res) => {
+  try {
+    const cronSecret = process.env.CRON_SECRET;
+    if (cronSecret && req.headers.authorization !== `Bearer ${cronSecret}`) {
+      return res.status(401).json({ error: 'Unauthorized cron trigger.' });
+    }
+    const result = await runAutoBackupIfDue(true);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    console.error('Cron backup error:', error);
+    res.status(500).json({ error: 'Scheduled backup failed.' });
+  }
+});
+
+app.get('/api/admin/backups', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const [settings, rows] = await Promise.all([
+      ensureBackupSettings(),
+      db
+        .select({
+          id: backups.id,
+          backupCode: backups.backupCode,
+          triggerType: backups.triggerType,
+          createdByEmail: backups.createdByEmail,
+          summaryJson: backups.summaryJson,
+          sizeBytes: backups.sizeBytes,
+          createdAt: backups.createdAt,
+        })
+        .from(backups)
+        .orderBy(desc(backups.createdAt))
+        .limit(50),
+    ]);
+
+    res.json({
+      settings,
+      backups: rows.map((r) => {
+        let summary = {
+          categories: 0,
+          brands: 0,
+          products: 0,
+          orders: 0,
+          reviews: 0,
+          users: 0,
+          newsletterSubscribers: 0,
+        };
+        try {
+          summary = { ...summary, ...JSON.parse(r.summaryJson || '{}') };
+        } catch {
+          // ignore malformed summary
+        }
+        return {
+          id: r.id,
+          backupCode: r.backupCode,
+          triggerType: r.triggerType,
+          createdByEmail: r.createdByEmail,
+          summary,
+          sizeBytes: r.sizeBytes,
+          createdAt: r.createdAt,
+        };
+      }),
+    });
+  } catch (error) {
+    console.error('List backups error:', error);
+    res.status(500).json({ error: 'Failed to load database backups.' });
+  }
+});
+
+app.put('/api/admin/backups/settings', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { enabled, intervalHours, retentionCount } = req.body || {};
+    const updated = await updateBackupSettings({ enabled, intervalHours, retentionCount });
+    res.json({ settings: updated });
+  } catch (error) {
+    console.error('Update backup settings error:', error);
+    res.status(500).json({ error: 'Failed to update backup schedule.' });
+  }
+});
+
+app.post('/api/admin/backups/run', requireAuth, requireAdmin, async (req: AuthRequest, res) => {
+  try {
+    const backup = await createDatabaseBackup('manual', req.authUser!.email);
+    res.status(201).json({ backup });
+  } catch (error) {
+    console.error('Manual backup error:', error);
+    res.status(500).json({ error: 'Failed to create backup snapshot.' });
+  }
+});
+
+app.get('/api/admin/backups/:id/download', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const found = await db
+      .select()
+      .from(backups)
+      .where(eq(backups.id, Number(req.params.id)))
+      .limit(1);
+
+    if (!found.length) {
+      return res.status(404).json({ error: 'Backup snapshot not found.' });
+    }
+    const row = found[0];
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${row.backupCode}.json"`);
+    res.send(row.snapshotJson);
+  } catch (error) {
+    console.error('Download backup error:', error);
+    res.status(500).json({ error: 'Failed to download backup file.' });
+  }
+});
+
+app.post('/api/admin/backups/:id/restore', requireAuth, requireAdmin, async (req: AuthRequest, res) => {
+  try {
+    const result = await restoreDatabaseBackup(Number(req.params.id), req.authUser!.email);
+    res.json({ ok: true, ...result });
+  } catch (error: any) {
+    console.error('Restore backup error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to restore backup.' });
+  }
+});
+
+app.delete('/api/admin/backups/:id', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    await db.delete(backups).where(eq(backups.id, Number(req.params.id)));
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Delete backup error:', error);
+    res.status(500).json({ error: 'Failed to delete backup snapshot.' });
+  }
+});
+
 // ==================== VITE / STATIC SERVING ====================
 
 async function startServer() {
@@ -1558,6 +1848,7 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`MAGNOM PHONES HUB server running on http://0.0.0.0:${PORT}`);
+    startBackupScheduler();
   });
 }
 
